@@ -1,0 +1,270 @@
+---
+title: "Dados Censo Demográfico (2000/2010/2022)"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    social: menu
+    source_code: embed
+---
+
+```{r setup, include=FALSE}
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(sf)
+library(tmap)
+library(stringr)
+library(stringi)
+library(geobr)
+
+
+setwd('C:/CENSO/')
+# População 2000
+file_path_2000 <- "./input/base/Tabela 1522.xlsx"
+populacao_2000 <- xlsx::read.xlsx(file_path_2000, sheetIndex  = 1, startRow = 2, encoding="UTF-8")
+names(populacao_2000) <- c('bairros','pop_2000')
+populacao_2000 <- subset(populacao_2000, !is.na(pop_2000))
+populacao_2000$bairros <- gsub(' - João Pessoa \\(PB)','',populacao_2000$bairros)
+populacao_2000$bairros <- gsub(' \\(PB)','',populacao_2000$bairros)
+populacao_2000$bairros <- ifelse(populacao_2000$bairros == 'Muçumagro',
+                                 'Mucumago',populacao_2000$bairros)
+populacao_2000$bairros <- str_replace_all(str_to_upper(populacao_2000$bairros), "[- ]", "_")
+
+
+
+# População 2010
+file_path <- "./input/base/Censo 2010_dados gerais_bairros JP.xlsx"
+populacao_2010 <- xlsx::read.xlsx(file_path, sheetIndex  = 2, startRow = 6, encoding="UTF-8")
+populacao_2010 <- populacao_2010[,1:2]
+names(populacao_2010) <- c('bairros','pop_2010')
+populacao_2010 <- subset(populacao_2010, !is.na(pop_2010))
+populacao_2010$bairros <- gsub(' - João Pessoa \\(PB)','',populacao_2010$bairros)
+populacao_2010$bairros <- gsub(' \\(PB)','',populacao_2010$bairros)
+populacao_2010$bairros <- str_replace_all(str_to_upper(populacao_2010$bairros), "[- ]", "_")
+
+# População 2022
+file_path <- "./input/base/Censo 2022_dados gerais_bairros JP.xlsx"
+populacao_2022 <- xlsx::read.xlsx(file_path, sheetIndex  = 1, startRow = 5, encoding="UTF-8")
+names(populacao_2022) <- c('bairros','pop_2022')
+populacao_2022 <- subset(populacao_2022, !is.na(pop_2022))
+populacao_2022$bairros <- stringr::str_trim(populacao_2022$bairros)
+populacao_2022$bairros <- str_replace_all(str_to_upper(populacao_2022$bairros), "[- ]", "_")
+
+
+
+# Shapefile
+shapefile_path <- file.path("./input/shapefile/25SEE250GC_SIR.shp")
+bairros <- st_read(shapefile_path, options = "ENCODING=WINDOWS-1252")
+
+# Filtrar para João Pessoa e simplificar geometria
+bairros_joao_pessoa <- bairros %>%
+  filter(NM_MUNICIP == "JOÃO PESSOA")
+
+bairros_simplificados <- bairros_joao_pessoa %>%
+  group_by(bairros = NM_BAIRRO) %>%
+  summarize(geometry = st_union(st_make_valid(geometry))) %>%
+  ungroup() %>%
+  mutate(bairros = str_replace_all(str_to_upper(bairros), "[- ]", "_"))
+
+bairros_simplificados$area <- as.numeric(st_area(bairros_simplificados$geometry)/1000)
+
+
+df_pop <- full_join(populacao_2000,populacao_2010) %>%
+  full_join(populacao_2022) %>% 
+  full_join(bairros_simplificados) %>% 
+  mutate(densidade_2022  = pop_2022/area,
+         cresc_2022_2010 = ((pop_2022 - pop_2010)/pop_2010)*100,
+         cresc_2022_2000 = ((pop_2022 - pop_2000)/pop_2000)*100) %>% 
+  st_as_sf()
+
+# Filtrar e remover as geometrias vazias
+df_pop <- df_pop[!st_is_empty(df_pop), ]
+
+## Função para gerar os intervalos
+generate_intervals <- function(var, n_intervals = 10, decimal_places = 2, cores = NULL) {
+  # Calcular valores mínimos e máximos
+  # min_val <- floor(min(var, na.rm = TRUE))
+  # max_val <- ceiling(max(var, na.rm = TRUE))
+  
+  min_val <- min(var, na.rm = TRUE)
+  max_val <- max(var, na.rm = TRUE)
+  
+  # Gerar os breaks separando valores negativos, zero e positivos
+  if(min_val < 0 ){
+      breaks <- unique(c(
+    seq(min_val, 0, length.out = ceiling(n_intervals / 2) + 1), # Intervalos negativos até zero
+    seq(0, max_val, length.out = floor(n_intervals / 2) + 1)    # Intervalos positivos a partir de zero
+  ))
+
+  } else {
+      breaks <- unique(c(
+  breaks <- seq(min_val, max_val, length.out = n_intervals + 1)
+  ))
+
+  }
+  
+  # Criar os labels
+  labels <- paste0(
+    gsub("\\.", ",", round(head(breaks, -1), decimal_places)), 
+    " à ", 
+    gsub("\\.", ",", round(tail(breaks, -1), decimal_places))
+  )
+  
+  if(is.null(cores)){
+   cores <- NULL 
+  } else {
+    cores <- cores
+  }
+
+  
+  # Retornar uma lista com breaks e labels
+  list(breaks = breaks, labels = labels, cores = cores)
+}
+
+tmap_mode("view")
+```
+
+
+Column {.tabset}
+-------------------------------------
+   
+### Crescimento populacional (2022-2010)
+
+```{r}
+
+intervals <- generate_intervals(df_pop$cresc_2022_2010, n_intervals = 10, cores = c("red","pink",  "white", "lightblue","blue"))
+
+#cartograma de diferença populacional
+
+tm_shape(df_pop) +
+  tm_polygons("cresc_2022_2010", title = "Crescimento Populacional (2010-2022)",
+              style = "fixed",
+              breaks = intervals$breaks, 
+              labels = intervals$labels,
+              palette = intervals$cores, 
+              midpoint = 0,
+              legend.format = list(digits = 0),
+              textNA = "Faltantes") +
+  tm_borders() +
+  tm_layout(title = "Crescimento Populacional por Bairro de João Pessoa entre 2010 e 2022")
+
+```
+
+### Crescimento populacional (2022-2000)
+
+```{r}
+intervals <- generate_intervals(df_pop$cresc_2022_2000, n_intervals = 9, cores = c("red","pink",  "white", "lightblue","blue"))
+
+#cartograma de diferença populacional
+tm_shape(df_pop) +
+  tm_polygons("cresc_2022_2000", title = "Crescimento Populacional (2000-2022)",
+              style = "fixed",
+              breaks = intervals$breaks, 
+              labels = intervals$labels,
+              palette = intervals$cores, midpoint = 0,
+              legend.format = list(digits = 0),
+              textNA = "Faltante") +
+  tm_borders() +
+  tm_layout(title = "Crescimento Populacional por Bairro de João Pessoa entre 2010 e 2022")
+
+```
+
+
+
+
+### Densidade populacional (2022)
+
+```{r}
+intervals <- generate_intervals(df_pop$densidade_2022, n_intervals = 12)
+
+# Criar o cartograma usando a nova tabela de dados
+tm_shape(df_pop) +
+  tm_polygons("densidade_2022", title = "Densidade Populacional por Bairro",
+              style = "fixed",
+              breaks = intervals$breaks, 
+              labels = intervals$labels,
+              palette = "Blues",
+              legend.format = list(digits = 0),
+              textNA = "Faltantes") +
+  tm_borders() +
+  tm_layout(title = "Densidade Populacional por Bairro de João Pessoa - CENSO 2022")
+```
+
+### População (2000)
+
+```{r}
+# Configuração do tmap
+intervals <- generate_intervals(df_pop$pop_2000, n_intervals = 10)
+
+# Criar o cartograma
+tm_shape(df_pop) +
+  tm_polygons("pop_2000", title = "População por Bairro",
+              style = "fixed",
+              breaks = intervals$breaks, 
+              labels = intervals$labels,
+              palette = "Blues",
+              legend.format = list(digits = 0),
+              textNA = "Faltante") +
+  tm_borders() +
+  tm_layout(title = "População por bairro de João Pessoa - CENSO 2000")
+```
+
+### População (2010)
+
+```{r}
+# Configuração do tmap
+intervals <- generate_intervals(df_pop$pop_2010, n_intervals = 10)
+
+# Criar o cartograma
+tm_shape(df_pop) +
+  tm_polygons("pop_2010", title = "População por Bairro",
+              style = "fixed",
+              breaks = intervals$breaks, 
+              labels = intervals$labels,
+              palette = "Blues",
+              legend.format = list(digits = 0),
+              textNA = "Faltante") +
+  tm_borders() +
+  tm_layout(title = "População por bairro de João Pessoa - CENSO 2010")
+```
+
+### População (2022)
+
+```{r}
+#carregar cartograma!
+intervals <- generate_intervals(df_pop$pop_2022, n_intervals = 10)
+
+# Criar o cartograma usando a nova tabela de dados
+tm_shape(df_pop) +
+  tm_polygons("pop_2022", title = "População por Bairro",
+              style = "fixed",
+              breaks = intervals$breaks, 
+              labels = intervals$labels,
+              palette = "Blues",
+              legend.format = list(digits = 0),
+              textNA = "Faltantes") +
+  tm_borders() +
+  tm_layout(title = "População por bairro de João Pessoa - CENSO 2022")
+```
+
+Column 
+-------------------------------------
+
+### Tabela
+
+```{r}
+table <- df_pop %>% as.data.frame() %>% 
+               select(-c(area,geometry)) %>% 
+  mutate(bairros = gsub("_"," ",bairros))
+names(table) <- c('Bairros','População 2000','População 2010','População 2022','Densidade 2022 (hab/km²)','Crescimento (2022-2010)','Crescimento (2010-2000)')
+
+
+# Gerar tabela com rolagem horizontal
+library(kableExtra)
+table %>%
+  kable(escape = FALSE, align = "c") %>%  # escape = FALSE permite HTML no título
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), 
+                full_width = TRUE, 
+                position = "center") %>% 
+  scroll_box(width = "100%", height = "800px")
+```
